@@ -50,6 +50,7 @@ import static org.ballerinalang.nativeimpl.jvm.interop.JInterop.J_PRIMITIVE_FLOA
 import static org.ballerinalang.nativeimpl.jvm.interop.JInterop.J_PRIMITIVE_INT_TNAME;
 import static org.ballerinalang.nativeimpl.jvm.interop.JInterop.J_PRIMITIVE_LONG_TNAME;
 import static org.ballerinalang.nativeimpl.jvm.interop.JInterop.J_PRIMITIVE_SHORT_TNAME;
+import static org.ballerinalang.nativeimpl.jvm.interop.JInterop.J_STRING_TNAME;
 import static org.ballerinalang.nativeimpl.jvm.interop.JInterop.J_VOID_TNAME;
 import static org.ballerinalang.nativeimpl.jvm.interop.JInteropException.CLASS_NOT_FOUND_REASON;
 import static org.ballerinalang.nativeimpl.jvm.interop.JInteropException.OVERLOADED_METHODS_REASON;
@@ -170,22 +171,28 @@ class JMethodResolver {
         Class<?>[] jParamTypes = jMethod.getParamTypes();
         BType[] bParamTypes = jMethodRequest.bParamTypes;
         int i = 0;
-        if (jMethod.isInstanceMethod() && bParamTypes.length > 0) {
-            if (!isValidExpectedBType(jMethodRequest.declaringClass, bParamTypes[i], jMethodRequest)) {
-                throw new JInteropException(JInteropException.METHOD_SIGNATURE_NOT_MATCH_REASON,
-                        "No such Java method '" + jMethodRequest.methodName +
-                                "' with method argument type '" + jParamTypes[i] + "' found in class '" +
-                                jMethodRequest.declaringClass + "'");
+
+        if (jMethod.isInstanceMethod()) {
+            if (bParamTypes.length != jParamTypes.length + 1) {
+                throw getParamCountMismatchError(jMethodRequest);
             }
-            i = 1;
+
+            BType receiverType = bParamTypes[0];
+            if (!isValidExpectedBType(jMethodRequest.declaringClass, receiverType, jMethodRequest)) {
+                throw getNoSuchMethodError(jMethodRequest.methodName, jParamTypes[0], receiverType,
+                        jMethodRequest.declaringClass);
+            }
+            i++;
+        } else if (bParamTypes.length != jParamTypes.length) {
+            throw getParamCountMismatchError(jMethodRequest);
         }
 
         for (int j = 0; j < jParamTypes.length; i++, j++) {
-            if (!isValidExpectedBType(jParamTypes[j], bParamTypes[i], jMethodRequest)) {
-                throw new JInteropException(JInteropException.METHOD_SIGNATURE_NOT_MATCH_REASON,
-                        "No such Java method '" + jMethodRequest.methodName +
-                                "' with method argument type '" + jParamTypes[j] + "' found in class '" +
-                                jMethodRequest.declaringClass + "'");
+            BType bParamType = bParamTypes[i];
+            Class<?> jParamType = jParamTypes[j];
+            if (!isValidExpectedBType(jParamType, bParamType, jMethodRequest)) {
+                throw getNoSuchMethodError(jMethodRequest.methodName, jParamType, bParamType,
+                        jMethodRequest.declaringClass);
             }
         }
     }
@@ -195,28 +202,32 @@ class JMethodResolver {
         BType bReturnType = jMethodRequest.bReturnType;
         if (!isValidExpectedBType(jReturnType, bReturnType, jMethodRequest)) {
             throw new JInteropException(JInteropException.METHOD_SIGNATURE_NOT_MATCH_REASON,
-                    "No such Java method '" + jMethodRequest.methodName +
-                            "' with method return type '" + jReturnType + "' found in class '" +
-                            jMethodRequest.declaringClass + "'");
+                    "Incompatible return type for method '" + jMethodRequest.methodName + "' in class '" +
+                            jMethodRequest.declaringClass.getName() + "': Java type '" + jReturnType.getName() +
+                            "' will not be matched to ballerina type '" + bReturnType + "'");
         }
     }
 
     private boolean isValidExpectedBType(Class<?> jParamType, BType bParamType, JMethodRequest jMethodRequest) {
         try {
-            String jParamTypeName = jParamType.getTypeName();
-            switch (bParamType.getTag()) {
-                case TypeTags.HANDLE_TAG:
-                case TypeTags.ANY_TAG:
-                case TypeTags.ANYDATA_TAG:
-                    return !jParamType.isPrimitive();
-                case TypeTags.NULL_TAG:
-                    return jParamTypeName.equals(J_VOID_TNAME);
-                case TypeTags.INT_TAG:
-                case TypeTags.BYTE_TAG:
-                case TypeTags.FLOAT_TAG:
-                    if (jParamTypeName.equals(J_OBJECT_TNAME)) {
-                        return true;
-                    }
+        String jParamTypeName = jParamType.getTypeName();
+        switch (bParamType.getTag()) {
+            case TypeTags.ANY_TAG:
+            case TypeTags.ANYDATA_TAG:
+                if (jParamTypeName.equals(J_STRING_TNAME)) {
+                    return false;
+                }
+                return !jParamType.isPrimitive();
+            case TypeTags.HANDLE_TAG:
+                return !jParamType.isPrimitive();
+            case TypeTags.NULL_TAG:
+                return jParamTypeName.equals(J_VOID_TNAME);
+            case TypeTags.INT_TAG:
+            case TypeTags.BYTE_TAG:
+            case TypeTags.FLOAT_TAG:
+                if (jParamTypeName.equals(J_OBJECT_TNAME)) {
+                    return true;
+                }
 
                     if (bParamType.getTag() == TypeTags.INT_TAG && jParamTypeName.equals(J_LONG_OBJ_TNAME)) {
                         return true;
@@ -230,56 +241,61 @@ class JMethodResolver {
                         return true;
                     }
 
-                    return jParamType.isPrimitive() &&
-                            (jParamTypeName.equals(J_PRIMITIVE_INT_TNAME) ||
-                                    jParamTypeName.equals(J_PRIMITIVE_BYTE_TNAME) ||
-                                    jParamTypeName.equals(J_PRIMITIVE_SHORT_TNAME) ||
-                                    jParamTypeName.equals(J_PRIMITIVE_LONG_TNAME) ||
-                                    jParamTypeName.equals(J_PRIMITIVE_CHAR_TNAME) ||
-                                    jParamTypeName.equals(J_PRIMITIVE_FLOAT_TNAME) ||
-                                    jParamTypeName.equals(J_PRIMITIVE_DOUBLE_TNAME));
-                case TypeTags.BOOLEAN_TAG:
-                    if (jParamTypeName.equals(J_OBJECT_TNAME) || jParamTypeName.equals(J_BOOLEAN_OBJ_TNAME)) {
+                return jParamType.isPrimitive() &&
+                        (jParamTypeName.equals(J_PRIMITIVE_INT_TNAME) ||
+                                jParamTypeName.equals(J_PRIMITIVE_BYTE_TNAME) ||
+                                jParamTypeName.equals(J_PRIMITIVE_SHORT_TNAME) ||
+                                jParamTypeName.equals(J_PRIMITIVE_LONG_TNAME) ||
+                                jParamTypeName.equals(J_PRIMITIVE_CHAR_TNAME) ||
+                                jParamTypeName.equals(J_PRIMITIVE_FLOAT_TNAME) ||
+                                jParamTypeName.equals(J_PRIMITIVE_DOUBLE_TNAME));
+            case TypeTags.BOOLEAN_TAG:
+                if (jParamTypeName.equals(J_OBJECT_TNAME) || jParamTypeName.equals(J_BOOLEAN_OBJ_TNAME)) {
+                    return true;
+                }
+                return jParamType.isPrimitive() && jParamTypeName.equals(J_PRIMITIVE_BOOLEAN_TNAME);
+            case TypeTags.DECIMAL_TAG:
+                return this.classLoader.loadClass(BigDecimal.class.getCanonicalName()).isAssignableFrom(jParamType);
+            case TypeTags.STRING_TAG:
+                // Currently no java type matches to ballerina string type.
+                return false;
+            case TypeTags.MAP_TAG:
+            case TypeTags.RECORD_TYPE_TAG:
+            case TypeTags.JSON_TAG:
+                return this.classLoader.loadClass(MapValue.class.getCanonicalName()).isAssignableFrom(jParamType);
+            case TypeTags.OBJECT_TYPE_TAG:
+            case TypeTags.SERVICE_TAG:
+                return this.classLoader.loadClass(ObjectValue.class.getCanonicalName())
+                        .isAssignableFrom(jParamType);
+            case TypeTags.ERROR_TAG:
+                return this.classLoader.loadClass(ErrorValue.class.getCanonicalName()).isAssignableFrom(jParamType);
+            case TypeTags.STREAM_TAG:
+                return this.classLoader.loadClass(StreamValue.class.getCanonicalName())
+                        .isAssignableFrom(jParamType);
+            case TypeTags.TABLE_TAG:
+                return this.classLoader.loadClass(TableValue.class.getCanonicalName()).isAssignableFrom(jParamType);
+            case TypeTags.XML_TAG:
+                return this.classLoader.loadClass(XMLValue.class.getCanonicalName()).isAssignableFrom(jParamType);
+
+            case TypeTags.TUPLE_TAG:
+            case TypeTags.ARRAY_TAG:
+                if (jMethodRequest.restParamExist) {
+                    return jParamType.isArray();
+                }
+                return this.classLoader.loadClass(ArrayValue.class.getCanonicalName()).isAssignableFrom(jParamType);
+            case TypeTags.UNION_TAG:
+                List<BType> members = ((BUnionType) bParamType).getMemberTypes();
+                for (BType member : members) {
+                    if (isValidExpectedBType(jParamType, member, jMethodRequest)) {
                         return true;
                     }
-                    return jParamType.isPrimitive() && jParamTypeName.equals(J_PRIMITIVE_BOOLEAN_TNAME);
-                case TypeTags.DECIMAL_TAG:
-                    return this.classLoader.loadClass(BigDecimal.class.getCanonicalName()).isAssignableFrom(jParamType);
-                case TypeTags.STRING_TAG:
-                    return this.classLoader.loadClass(String.class.getCanonicalName()).isAssignableFrom(jParamType);
-                case TypeTags.MAP_TAG:
-                case TypeTags.RECORD_TYPE_TAG:
-                case TypeTags.JSON_TAG:
-                    return this.classLoader.loadClass(MapValue.class.getCanonicalName()).isAssignableFrom(jParamType);
-                case TypeTags.OBJECT_TYPE_TAG:
-                case TypeTags.SERVICE_TAG:
-                    return this.classLoader.loadClass(ObjectValue.class.getCanonicalName())
-                                                                                .isAssignableFrom(jParamType);
-                case TypeTags.ERROR_TAG:
-                    return this.classLoader.loadClass(ErrorValue.class.getCanonicalName()).isAssignableFrom(jParamType);
-                case TypeTags.STREAM_TAG:
-                    return this.classLoader.loadClass(StreamValue.class.getCanonicalName())
-                                                                        .isAssignableFrom(jParamType);
-                case TypeTags.TABLE_TAG:
-                    return this.classLoader.loadClass(TableValue.class.getCanonicalName()).isAssignableFrom(jParamType);
-                case TypeTags.XML_TAG:
-                    return this.classLoader.loadClass(XMLValue.class.getCanonicalName()).isAssignableFrom(jParamType);
-                case TypeTags.TUPLE_TAG:
-                case TypeTags.ARRAY_TAG:
-                    if (jMethodRequest.restParamExist) {
-                        return jParamType.isArray();
-                    }
-                    return this.classLoader.loadClass(ArrayValue.class.getCanonicalName()).isAssignableFrom(jParamType);
-                case TypeTags.UNION_TAG:
-                    List<BType> members = ((BUnionType) bParamType).getMemberTypes();
-                    for (BType member : members) {
-                        if (isValidExpectedBType(jParamType, member, jMethodRequest)) {
-                            return true;
-                        }
-                    }
-                    return !jParamType.isPrimitive();
-            }
-            return false;
+                }
+                if (jParamTypeName.equals(J_STRING_TNAME)) {
+                    return false;
+                }
+                return !jParamType.isPrimitive();
+        }
+        return false;
         } catch (ClassNotFoundException | NoClassDefFoundError e) {
             throw new JInteropException(CLASS_NOT_FOUND_REASON, e.getMessage(), e);
         }
@@ -455,5 +471,18 @@ class JMethodResolver {
             stringJoiner.add(paramTypeConstraint.get().getName());
         }
         return stringJoiner.toString();
+    }
+
+    private JInteropException getNoSuchMethodError(String methodName, Class<?> jType, BType bType,
+                                                   Class<?> declaringClass) {
+        return new JInteropException(JInteropException.METHOD_SIGNATURE_NOT_MATCH_REASON,
+                "Incompatible param type for method '" + methodName + "' in class '" + declaringClass.getName() +
+                        "': Java type '" + jType.getName() + "' will not be matched to ballerina type '" + bType + "'");
+    }
+
+    private JInteropException getParamCountMismatchError(JMethodRequest jMethodRequest) {
+        return new JInteropException(JInteropException.METHOD_SIGNATURE_NOT_MATCH_REASON,
+                "Parameter count does not match with Java method '" + jMethodRequest.methodName + "' found in class '" +
+                        jMethodRequest.declaringClass.getName() + "'");
     }
 }
